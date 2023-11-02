@@ -1,4 +1,5 @@
 proc tcount_mysql {bm interval masterthread} {
+    puts "tcount_mysql"
     global tc_threadID mysql_ssl_options
     upvar #0 dbdict dbdict
     if {[dict exists $dbdict mysql library ]} {
@@ -14,27 +15,38 @@ proc tcount_mysql {bm interval masterthread} {
             }
         }
     
-        proc ConnectToMySQL { MASTER host port socket ssl_options user password } {
+        proc ConnectToMySQL { MASTER host port socket ssl_options user password is_oceanbase ob_tenant_name} {
             global mysqlstatus
             #ssl_options is variable length so build a connectstring
-            if { [ chk_socket $host $socket ] eq "TRUE" } {
+            if { ($is_oceanbase == "false" ) && ([ chk_socket $host $socket ] eq "TRUE") } {
                 set use_socket "true"
-                append connectstring " -socket $socket"
+                append connectstring " -socket $socket"        
             } else {
                 set use_socket "false"
                 append connectstring " -host $host -port $port"
+                set user "$user@$ob_tenant_name"
             }
+
+            # if { [ chk_socket $host $socket ] eq "TRUE" } {
+            #     set use_socket "true"
+            #     append connectstring " -socket $socket"
+            # } else {
+            #     set use_socket "false"
+            #     append connectstring " -host $host -port $port"
+            # }
             foreach key [ dict keys $ssl_options ] {
                 append connectstring " $key [ dict get $ssl_options $key ] "
             }
             append connectstring " -user $user -password $password"
             set login_command "mysqlconnect [ dict get $connectstring ]"
             #eval the login command
+            puts "mysqlotc login_command $login_command"
             if [catch {set mysql_handler [eval $login_command]} message ] {
                 set connected "false"
             } else {
                 set connected "true"
             }
+            puts "connected $connected"
             if {$connected} {
                 return $mysql_handler
             } else {
@@ -45,7 +57,7 @@ proc tcount_mysql {bm interval masterthread} {
             }
         }
 
-        proc read_more { MASTER library mysql_host mysql_port mysql_socket mysql_ssl_options mysql_user mysql_pass mysql_tpch_user mysql_tpch_pass interval old tce bm } {
+        proc read_more { MASTER library mysql_host mysql_port mysql_socket mysql_ssl_options mysql_user mysql_pass mysql_tpch_user mysql_tpch_pass interval old tce bm mysql_tpch_obcompat ob_tenant_name} {
             set timeout 0
             set iconflag 0
             if { $interval <= 0 } { set interval 10 } 
@@ -85,26 +97,33 @@ proc tcount_mysql {bm interval masterthread} {
                 namespace import tcountcommon::*
             }
 
-            set mysql_handler [ ConnectToMySQL $MASTER $mysql_host $mysql_port $mysql_socket $mysql_ssl_options $tmp_mysql_user $tmp_mysql_pass ]
+            set mysql_handler [ ConnectToMySQL $MASTER $mysql_host $mysql_port $mysql_socket $mysql_ssl_options $tmp_mysql_user $tmp_mysql_pass $mysql_tpch_obcompat $ob_tenant_name]
 
             #Enter loop until stop button pressed
             while { $timeout eq 0 } {
                 set timeout [ tsv::get application timeout ]
                 if { $timeout != 0 } { break }
 
-                if {[catch {set handler_stat [ list [ mysql::sel $mysql_handler $sqc -list ] ]} message]} {
+                puts "sql: $sqc"
+                if {[catch {set handler_stat [ list [ mysql::sel $mysql_handler $sqc -list ] ]} message]} {                    
                     tsv::set application tc_errmsg "sql failed $message"
                     eval [subst {thread::send $MASTER show_tc_errmsg}]
                     catch { mysqlclose $mysql_handler }
                     break
                 } else {
+                    puts "sel success bm=$bm"
                     if { $bm eq "TPC-C" } {
                         regexp {\{\{Com_commit\ ([0-9]+)\}\ \{Com_rollback\ ([0-9]+)\}\}} $handler_stat all com_comm com_roll
                         set outc [ expr $com_comm + $com_roll ]
                     } else {
+                        puts "sel success 1"
                         regexp {\{\{Com_show_status\ ([0-9]+)\}\ \{Queries\ ([0-9]+)\}\}} $handler_stat all show_stat queries
+                        puts "sel success 2 handler_stat=$handler_stat"
                         regexp {\{\{Queries\ ([0-9]+)\}\}} $handler_stat all show_stat queries
+                        puts "sel success 3 queries=$queries, show_stat=$show_stat"
                         set outc [ expr $queries - $show_stat ]
+                        puts "sel success 4"
+                        # puts "queries $queries"
                     }
                 }
                 set new $outc
@@ -127,6 +146,7 @@ proc tcount_mysql {bm interval masterthread} {
                         }
                     }
                     lappend tcdata $newtick [expr {[expr {abs($new - $old)}] * $mplier}]
+                    puts "newtick $newtick"
                     lappend timedata $newtick $tstamp
                     if { ![ isdiff $tcdata ] } {
                         set tcdata [ lreplace $tcdata 1 1 0 ]
@@ -166,5 +186,5 @@ proc tcount_mysql {bm interval masterthread} {
     if ![ info exists mysql_ssl_options ] { check_mysql_ssl $configmysql }
     set old 0
     #Call Transaction Counter to start read_more loop
-    eval [ subst {thread::send -async $tc_threadID { read_more $masterthread $library $mysql_host $mysql_port $mysql_socket {$mysql_ssl_options} $mysql_user $mysql_pass $mysql_tpch_user $mysql_tpch_pass $interval $old tce $bm }}]
+    eval [ subst {thread::send -async $tc_threadID { read_more $masterthread $library $mysql_host $mysql_port $mysql_socket {$mysql_ssl_options} $mysql_user $mysql_pass $mysql_tpch_user $mysql_tpch_pass $interval $old tce $bm $mysql_tpch_obcompat $ob_tenant_name}}]
 } 
